@@ -1,5 +1,11 @@
 [phases.setup]
-nixPkgs = ["ffmpeg"]
+# تثبيت الأدوات النظامية الأساسية
+nixPkgs = ["ffmpeg", "python311"]
+
+[phases.install]
+# هذا السطر يضمن تثبيت كل المكتبات من requirements.txt
+cmds = ["pip install -r requirements.txt"]
 
 [start]
+# أمر التشغيل
 cmd = "uvicorn server:app --host 0.0.0.0 --port $PORT"
