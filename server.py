@@ -2,6 +2,7 @@
 SaveAll Video Downloader API
 Backend Server - Production Ready for Railway
 Author: Mounir Djouida
+Version: 1.3.0 - Fixed sorting and YouTube access issues
 """
 
 import os
@@ -47,22 +48,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="SaveAll Video Downloader API",
     description="واجهة برمجية لتحميل الفيديوهات من يوتيوب، فيسبوك، انستغرام، وتيك توك",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
-    docs_url="/api/docs",      # وثائق Swagger
-    redoc_url="/api/redoc"     # وثائق ReDoc
+    docs_url="/api/docs",
+    redoc_url="/api/redoc"
 )
 
 # ─────────────────────────────────────────────────────────────
 # 🔐 إعدادات الأمان والوسيط (Middleware)
 # ─────────────────────────────────────────────────────────────
 
-# 1. تحديد معدل الطلبات (Rate Limiting) - لمنع الإساءة
+# تحديد معدل الطلبات
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# 2. سياسة CORS - السماح للواجهة الأمامية بالاتصال
+# سياسة CORS
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://mounirdjouida.yzz.me,*").split(",")
 app.add_middleware(
     CORSMiddleware,
@@ -73,7 +74,7 @@ app.add_middleware(
     expose_headers=["Content-Length", "Content-Disposition"]
 )
 
-# 3. ضغط الاستجابات (GZip) - لتقليل حجم البيانات المرسلة
+# ضغط الاستجابات
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # ─────────────────────────────────────────────────────────────
@@ -82,11 +83,9 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 def sanitize_filename(filename: str) -> str:
     """تنظيف اسم الملف من الأحرف غير الصالحة"""
-    # إزالة الأحرف الخاصة واستبدالها بشرطة سفلية
     filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    # إزالة المسافات الزائدة
     filename = ' '.join(filename.split())
-    return filename[:100]  # تحديد الطول الأقصى
+    return filename[:100]
 
 def format_filesize(bytes_size: Optional[int]) -> str:
     """تحويل حجم الملف من بايت إلى صيغة مقروءة"""
@@ -119,7 +118,7 @@ async def root():
     """نقطة جذرية للتحقق من عمل الخادم"""
     return {
         "service": "SaveAll API",
-        "version": "1.2.0",
+        "version": "1.3.0",
         "status": "running",
         "docs": "/api/docs"
     }
@@ -134,28 +133,43 @@ async def health_check():
     }
 
 @app.get("/api/info")
-@limiter.limit("10/minute")  # حد أقصى: 10 طلبات في الدقيقة لكل عنوان IP
+@limiter.limit("10/minute")
 async def get_video_info(request: Request, url: str = Query(..., min_length=10, description="رابط الفيديو المراد تحليله")):
     """
     استخراج معلومات الفيديو والجودات المتاحة
-    
-    - **url**: رابط الفيديو من منصة مدعومة
-    - **يعيد**: بيانات الفيديو + قائمة بالجودات المتاحة
     """
-    # 1. التحقق من صحة الرابط
+    # التحقق من صحة الرابط
     if not is_valid_video_url(url):
         logger.warning(f"❌ رابط غير مدعوم: {url[:50]}...")
         raise HTTPException(status_code=400, detail="الرابط غير مدعوم. استخدم يوتيوب، فيسبوك، انستغرام، أو تيك توك")
     
     logger.info(f"🔍 تحليل الرابط: {url[:60]}...")
     
-    # 2. خيارات yt-dlp لاستخراج المعلومات فقط
+    # خيارات yt-dlp المحسّنة لتجاوز حظر يوتيوب
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
-        "socket_timeout": 15,
-        "extractor_args": {"youtube": {"skip": ["hls", "dash"]}}  # تسريع الاستخراج
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
+        # استخدام متصفحات وعملاء مختلفين لتجاوز الحظر
+        "extractor_args": {
+            "youtube": {
+                "skip": ["hls", "dash"],
+                "player_client": ["ios", "web", "tv"],  # تجربة عملاء متعددين
+                "player_skip": ["webpage"]
+            }
+        },
+        # محاكاة متصفح حقيقي
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-us,en;q=0.5",
+            "Sec-Fetch-Mode": "navigate"
+        },
+        # تجنب بعض القيود
+        "no_check_certificate": True,
     }
     
     try:
@@ -165,7 +179,7 @@ async def get_video_info(request: Request, url: str = Query(..., min_length=10, 
             if not info:
                 raise ValueError("فشل في استخراج البيانات")
             
-            # 3. تصفية وتنسيق الجودات المتاحة
+            # تصفية وتنسيق الجودات المتاحة
             formats = []
             seen_resolutions = set()
             
@@ -176,7 +190,7 @@ async def get_video_info(request: Request, url: str = Query(..., min_length=10, 
                 
                 resolution = f.get("resolution") or f.get("format_note") or "غير معروف"
                 
-                # تجنب التكرار في الجودات المتشابهة
+                # تجنب التكرار
                 if resolution in seen_resolutions and f.get("filesize", 0) == 0:
                     continue
                 seen_resolutions.add(resolution)
@@ -193,10 +207,10 @@ async def get_video_info(request: Request, url: str = Query(..., min_length=10, 
                     "is_audio_only": f.get("vcodec") == "none" and f.get("acodec") != "none"
                 })
             
-            # ترتيب: الأكبر حجماً أولاً، ثم حسب الدقة
-            formats.sort(key=lambda x: (x["filesize"], x["resolution"]), reverse=True)
+            # ✅ الحل: ترتيب مع معالجة القيم الفارغة (None)
+            formats.sort(key=lambda x: (x["filesize"] or 0, x["resolution"] or ""), reverse=True)
             
-            # إرجاع أفضل 15 جودة فقط لتجنب الثقل
+            # إرجاع أفضل 15 جودة فقط
             response_data = {
                 "success": True,
                 "data": {
@@ -215,14 +229,28 @@ async def get_video_info(request: Request, url: str = Query(..., min_length=10, 
             return response_data
             
     except yt_dlp.utils.DownloadError as e:
-        logger.error(f"❌ خطأ yt-dlp: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"لا يمكن الوصول للفيديو: {str(e)[:100]}")
+        error_msg = str(e)
+        logger.error(f"❌ خطأ yt-dlp: {error_msg}")
+        
+        # رسائل خطأ مخصصة
+        if "Sign in to confirm" in error_msg or "bot" in error_msg:
+            raise HTTPException(
+                status_code=400, 
+                detail="يوتيوب يمنع الوصول من الخادم. جرب استخدام رابط آخر أو انتظر قليلاً."
+            )
+        elif "Private video" in error_msg:
+            raise HTTPException(status_code=400, detail="هذا الفيديو خاص. لا يمكن تحميله.")
+        elif "unavailable" in error_msg:
+            raise HTTPException(status_code=400, detail="الفيديو غير متوفر أو تم حذفه.")
+        else:
+            raise HTTPException(status_code=400, detail=f"لا يمكن الوصول للفيديو: {error_msg[:150]}")
+            
     except Exception as e:
         logger.exception(f"❌ خطأ غير متوقع: {str(e)}")
         raise HTTPException(status_code=500, detail="خطأ داخلي في الخادم. حاول مرة أخرى لاحقاً")
 
 @app.get("/api/download")
-@limiter.limit("3/minute")  # حد أقصى: 3 تحميلات في الدقيقة (أثقل عملية)
+@limiter.limit("3/minute")
 async def download_video(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -232,10 +260,6 @@ async def download_video(
 ):
     """
     تحميل الفيديو وإرساله كمجرى بيانات (Streaming)
-    
-    - **url**: رابط الفيديو الأصلي
-    - **format_id**: معرف الجودة المختارة من /api/info
-    - **filename**: اسم الملف للتنزيل (اختياري)
     """
     if not is_valid_video_url(url):
         raise HTTPException(status_code=400, detail="الرابط غير مدعوم")
@@ -247,39 +271,49 @@ async def download_video(
     temp_path = temp_file.name
     temp_file.close()
     
-    # خيارات التحميل والدمج
+    # خيارات التحميل والدمج المحسّنة
     ydl_opts = {
         "format": format_id,
-        "merge_output_format": "mp4",  # دمج الصوت والصورة في MP4
+        "merge_output_format": "mp4",
         "outtmpl": temp_path,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 45,
-        "retries": 2,
-        "fragment_retries": 2
+        "socket_timeout": 60,
+        "retries": 3,
+        "fragment_retries": 3,
+        # نفس الخيارات لتجاوز الحظر
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "web"]
+            }
+        },
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        },
+        "no_check_certificate": True,
     }
     
     try:
-        # 1. تنفيذ التحميل الفعلي
+        # تنفيذ التحميل الفعلي
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
         
-        # 2. التحقق من نجاح إنشاء الملف
+        # التحقق من نجاح إنشاء الملف
         if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
             raise RuntimeError("فشل في إنشاء ملف الفيديو")
         
-        # 3. إعداد اسم الملف للتنزيل
+        # إعداد اسم الملف للتنزيل
         safe_title = sanitize_filename(filename or info.get("title", "video"))
         content_disposition = f'attachment; filename="{safe_title}.mp4"'
         
-        # 4. دالة لتدفق الملف بشكل مجزأ (Chunked Streaming)
+        # دالة لتدفق الملف
         def stream_file():
             try:
                 with open(temp_path, "rb") as f:
-                    while chunk := f.read(8192):  # قراءة 8KB في كل مرة
+                    while chunk := f.read(8192):
                         yield chunk
             finally:
-                # تنظيف: حذف الملف المؤقت بعد الإرسال
+                # تنظيف: حذف الملف المؤقت
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
                     logger.info(f"🗑️ تم حذف الملف المؤقت: {temp_path}")
@@ -297,7 +331,6 @@ async def download_video(
         )
         
     except yt_dlp.utils.DownloadError as e:
-        # تنظيف في حالة الفشل
         if os.path.exists(temp_path):
             os.remove(temp_path)
         logger.error(f"❌ فشل التحميل: {str(e)}")
@@ -337,7 +370,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 if __name__ == "__main__":
     import uvicorn
     
-    # قراءة إعدادات المنفذ من متغيرات البيئة (مهم لـ Railway)
     port = int(os.getenv("PORT", os.getenv("RAILWAY_PORT", 8000)))
     host = os.getenv("HOST", "0.0.0.0")
     workers = int(os.getenv("UVICORN_WORKERS", 1))
