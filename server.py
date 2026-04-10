@@ -1,6 +1,6 @@
 """
 SaveAll Video Downloader API
-Version: 1.3.1 - Fixed Float Duration Error & Improved YouTube Handling
+Version: 1.3.2 - Fixed all issues
 """
 
 import os
@@ -20,7 +20,7 @@ from slowapi.errors import RateLimitExceeded
 import yt_dlp
 
 # ─────────────────────────────────────────────────────────────
-# ⚙️ إعدادات التسجيل (Logging)
+# ⚙️ Logging
 # ─────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -30,21 +30,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
-# 🔄 دورة حياة التطبيق
+# 🔄 Lifespan
 # ─────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🚀 بدء تشغيل خادم SaveAll API v1.3.1")
+    logger.info("🚀 بدء تشغيل خادم SaveAll API v1.3.2")
     yield
     logger.info("🛑 إيقاف الخادم")
 
 # ─────────────────────────────────────────────────────────────
-# 🏗️ تهيئة التطبيق
+# 🏗️ App Init
 # ─────────────────────────────────────────────────────────────
-app = FastAPI(title="SaveAll API", version="1.3.1", lifespan=lifespan)
+app = FastAPI(title="SaveAll API", version="1.3.2", lifespan=lifespan)
 
 # ─────────────────────────────────────────────────────────────
-# 🔐 Middleware & Security
+# 🔐 Middleware
 # ─────────────────────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
@@ -52,25 +52,35 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # للسماح بالوصول من واجهتك
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # ─────────────────────────────────────────────────────────────
-# 🔧 دوال مساعدة
+# 🔧 Helper Functions
 # ─────────────────────────────────────────────────────────────
 
-def get_safe_duration(duration_val):
-    """تحويل المدة إلى دقائق:ثواني بأمان"""
+def format_duration(duration_val):
+    """✅ تحويل آمن للمدة من float إلى int"""
+    if not duration_val:
+        return "00:00"
     try:
-        if not duration_val:
-            return "00:00"
-        d = int(float(duration_val))  # تحويل إلى عدد صحيح
+        d = int(float(duration_val))  # تحويل آمن
         return f"{d // 60}:{d % 60:02d}"
     except:
         return "00:00"
+
+def format_filesize(bytes_size):
+    """تنسيق حجم الملف"""
+    if not bytes_size:
+        return "غير معروف"
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes_size < 1024.0:
+            return f"{bytes_size:.1f} {unit}"
+        bytes_size /= 1024.0
+    return f"{bytes_size:.1f} TB"
 
 # ─────────────────────────────────────────────────────────────
 # 📡 Endpoints
@@ -78,7 +88,7 @@ def get_safe_duration(duration_val):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "1.3.1"}
+    return {"status": "ok", "version": "1.3.2"}
 
 @app.get("/api/info")
 @limiter.limit("10/minute")
@@ -86,23 +96,28 @@ async def get_video_info(request: Request, url: str = Query(...)):
     """استخراج معلومات الفيديو"""
     logger.info(f"🔍 تحليل: {url[:50]}...")
 
-    # خيارات yt-dlp المحسّنة جداً
+    # ✅ خيارات محسّنة لتجاوز حظر يوتيوب
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
         "socket_timeout": 30,
         "retries": 3,
-        # محاولة تجاوز حظر يوتيوب باستخدام عملاء مختلفين
+        "fragment_retries": 3,
+        # ✅ استخدام عملاء متعددين لتجاوز الحظر
         "extractor_args": {
             "youtube": {
-                "player_client": ["ios", "web", "tv", "web_embedded"],
+                "player_client": ["ios", "web", "tv", "web_embedded", "mweb"],
                 "player_skip": ["configs", "webpage"]
             }
         },
+        # ✅ محاكاة متصفح حقيقي
         "headers": {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        }
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        },
+        "no_check_certificate": True,
     }
 
     try:
@@ -113,45 +128,61 @@ async def get_video_info(request: Request, url: str = Query(...)):
                 raise ValueError("Empty response")
 
             formats = []
-            # تصفية الجودات
             for f in info.get("formats", []):
                 if f.get("vcodec") == "none" and f.get("acodec") == "none":
                     continue
                 
-                # استخراج الحجم بأمان
                 size = f.get("filesize_approx") or f.get("filesize") or 0
                 
                 formats.append({
                     "format_id": f["format_id"],
-                    "resolution": f.get("resolution") or "Unknown",
+                    "resolution": f.get("resolution") or f.get("format_note") or "Unknown",
                     "ext": f.get("ext", "mp4"),
-                    "filesize": int(size), # ضمان أن الحجم عدد صحيح
-                    "filesize_human": f"{size / 1024 / 1024:.1f} MB" if size else "Unknown",
-                    "is_audio_only": f.get("vcodec") == "none"
+                    "filesize": int(size) if size else 0,
+                    "filesize_human": format_filesize(size),
+                    "is_audio_only": f.get("vcodec") == "none" and f.get("acodec") != "none"
                 })
 
-            # ترتيب النتائج
-            formats.sort(key=lambda x: x["filesize"] or 0, reverse=True)
+            # ✅ ترتيب آمن مع معالجة القيم الفارغة
+            formats.sort(key=lambda x: (x["filesize"] or 0), reverse=True)
 
             return {
                 "success": True,
                 "data": {
-                    "title": info.get("title", "Unknown Title"),
+                    "title": info.get("title", "عنوان غير معروف"),
+                    "thumbnail": info.get("thumbnail", ""),
                     "duration": info.get("duration"),
-                    "duration_human": get_safe_duration(info.get("duration")), # ✅ الإصلاح هنا
-                    "uploader": info.get("uploader"),
-                    "formats": formats[:12] # عرض أفضل 12 جودة فقط
+                    "duration_human": format_duration(info.get("duration")),  # ✅ الإصلاح هنا
+                    "uploader": info.get("uploader", "غير معروف"),
+                    "view_count": info.get("view_count"),
+                    "platform": info.get("extractor_key", "unknown"),
+                    "formats": formats[:15]
                 }
             }
 
     except yt_dlp.utils.DownloadError as e:
         msg = str(e)
-        if "bot" in msg or "Sign in" in msg:
-            raise HTTPException(status_code=400, detail="🚫 يوتيوب يمنع الوصول من هذا الخادم حالياً. يرجى تجربة فيديو آخر أو إعادة المحاولة لاحقاً.")
-        raise HTTPException(status_code=400, detail=f"❌ خطأ في التحليل: {msg[:100]}")
+        logger.error(f"❌ yt-dlp error: {msg}")
+        
+        # ✅ معالجة أخطاء مختلفة
+        if "bot" in msg.lower() or "sign in" in msg.lower():
+            raise HTTPException(
+                status_code=400, 
+                detail="🚫 يوتيوب يمنع الوصول من الخادم. جرب فيديو آخر أو انتظر قليلاً."
+            )
+        elif "unavailable" in msg.lower() or "error code" in msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail="❌ الفيديو غير متوفر أو تم حذفه أو مقيد في منطقتك."
+            )
+        elif "private" in msg.lower():
+            raise HTTPException(status_code=400, detail="🔒 الفيديو خاص.")
+        else:
+            raise HTTPException(status_code=400, detail=f"❌ خطأ: {msg[:150]}")
+            
     except Exception as e:
-        logger.error(f"💥 Error: {e}")
-        raise HTTPException(status_code=500, detail=f"❌ خطأ داخلي: {str(e)}")
+        logger.exception(f"💥 Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail=f"❌ خطأ داخلي: {str(e)[:100]}")
 
 @app.get("/api/download")
 @limiter.limit("3/minute")
@@ -167,26 +198,39 @@ async def download_video(request: Request, url: str = Query(...), format_id: str
         "outtmpl": temp_path,
         "quiet": True,
         "no_warnings": True,
+        "socket_timeout": 60,
+        "retries": 3,
         "extractor_args": {"youtube": {"player_client": ["ios", "web"]}},
         "headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        },
+        "no_check_certificate": True,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
+        if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+            raise RuntimeError("فشل في إنشاء الملف")
+
         def stream():
             with open(temp_path, "rb") as f:
                 yield from f.read()
-            if os.path.exists(temp_path): os.remove(temp_path)
+            if os.path.exists(temp_path): 
+                os.remove(temp_path)
 
-        return StreamingResponse(stream(), media_type="video/mp4", 
-                                 headers={"Content-Disposition": f'attachment; filename="video.mp4"'})
+        return StreamingResponse(
+            stream(), 
+            media_type="video/mp4",
+            headers={"Content-Disposition": 'attachment; filename="video.mp4"'}
+        )
+        
     except Exception as e:
-        if os.path.exists(temp_path): os.remove(temp_path)
-        raise HTTPException(status_code=500, detail=str(e))
+        if os.path.exists(temp_path): 
+            os.remove(temp_path)
+        logger.error(f"❌ Download error: {e}")
+        raise HTTPException(status_code=500, detail=str(e)[:150])
 
 if __name__ == "__main__":
     import uvicorn
